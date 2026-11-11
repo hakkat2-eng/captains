@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null && request.auth.token.email != null; }
+    function myEmail() { return request.auth.token.email.lower(); }
+    function staffPath() { return /databases/$(database)/documents/staff/$(request.auth.token.email.lower()); }
+    function isStaff() { return signedIn() && exists(staffPath()) && get(staffPath()).data.active == true; }
+    function isAdmin() { return isStaff() && get(staffPath()).data.role == 'admin'; }
+    function isMgr() { return isStaff() && get(staffPath()).data.role in ['admin', 'mgr']; }
+
+    match /staff/{email} {
+      allow read: if signedIn() && (myEmail() == email || isAdmin());
+      allow create: if isAdmin() || (
+        signedIn() && myEmail() == email
+        && request.resource.data.role == 'admin'
+        && !exists(/databases/$(database)/documents/meta/setup)
+        && existsAfter(/databases/$(database)/documents/meta/setup));
+      allow update, delete: if isAdmin();
+    }
+
+    match /meta/{docId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && docId == 'setup'
+        && !exists(/databases/$(database)/documents/meta/setup)
+        && existsAfter(staffPath())
+        && getAfter(staffPath()).data.role == 'admin';
+      allow update, delete: if false;
+    }
+
+    // الكباتن: الميدر يضيف ويعدّل، مسؤول الشفت يعدّل حقل الإجازات فقط، الحذف للإدارة العليا
+    match /members/{id} {
+      allow read: if isStaff();
+      allow create: if isMgr();
+      allow update: if isMgr() || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['leaves']));
+      allow delete: if isAdmin();
+    }
+    match /archivedMembers/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+
+    // الحضور والعدّادات: كل الموظفين
+    match /att/{id}    { allow read, write: if isStaff(); }
+    match /counts/{id} { allow read, write: if isStaff(); }
+
+    // طلبات الموافقة: الميدر يرفع، الإدارة العليا تقرر
+    match /requests/{id} {
+      allow read: if isMgr();
+      allow create: if isMgr() && request.resource.data.by == myEmail() && request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
+    // سجل النشاطات: أي موظف يضيف سطراً باسمه، الإدارة العليا فقط تقرأ، ولا أحد يعدّل أو يحذف
+    match /logs/{id} {
+      allow read: if isAdmin();
+      allow create: if isStaff() && request.resource.data.by == myEmail();
+      allow update, delete: if false;
+    }
+
+    match /fines/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+    match /subs/{id}  { allow read: if isStaff(); allow write: if isAdmin(); }
+    match /warns/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+    match /cfg/{id}   { allow read: if isStaff(); allow write: if isAdmin(); }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
